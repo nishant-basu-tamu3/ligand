@@ -33,6 +33,7 @@ class Rec:
     fast: bool = False
     gold_chain: tuple = ()
     needed: bool = False
+    par_ms: float = 0.0
 
 
 def make_engine(world: World, tools, cfg: Cfg | None = None) -> Engine:
@@ -70,6 +71,7 @@ def agent_emit(eng: Engine, task: dict, pi: int, prev=None) -> tuple[Rec, str]:
     asked = em.status == "ask"
     gold_chain = tuple(fq for fq, _ in task["chain"])
     router_ms = em.router_ms
+    par_ms = em.par_ms
     n_calls = em.n_calls
     if asked:
         k = next((i for i, key in enumerate(em.cands) if key == gold_chain), -1)
@@ -78,11 +80,12 @@ def agent_emit(eng: Engine, task: dict, pi: int, prev=None) -> tuple[Rec, str]:
         in_tok += ntok(em2.response)
         turns += 1
         router_ms += em2.router_ms
+        par_ms += em2.router_ms
         n_calls += em2.n_calls
         em = em2
     ok = em.status == "ok" and judge(task, pi, em.rows)
     rec = Rec(task["id"], task["tid"], task["split"], pi, ok, asked, em.status, out_tok, in_tok, turns, n_calls, router_ms,
-              em.chain_key, em.fast, gold_chain, needed)
+              em.chain_key, em.fast, gold_chain, needed, par_ms)
     return rec, em.ticket
 
 
@@ -116,4 +119,5 @@ def summarize(recs: list[Rec]) -> dict:
         "out_tok": sum(r.out_tok for r in recs) / n,
         "in_tok": sum(r.in_tok for r in recs) / n,
         "router_ms": sum(r.router_ms for r in recs) / n,
+        "par_ms": sum(r.par_ms for r in recs) / n,
     }

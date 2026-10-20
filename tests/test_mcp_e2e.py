@@ -26,7 +26,8 @@ SEED = 0
 
 
 def params(memory: str) -> StdioServerParameters:
-    return StdioServerParameters(command=sys.executable, args=["-m", "ligand.mcp_server", "--seed", str(SEED), "--memory", memory],
+    extra = ["--v1"] if os.environ.get("LIGAND_V1") else []
+    return StdioServerParameters(command=sys.executable, args=["-m", "ligand.mcp_server", "--seed", str(SEED), "--memory", memory] + extra,
                                  cwd=ROOT, env={**os.environ, "PYTHONPATH": ROOT})
 
 

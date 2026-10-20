@@ -201,6 +201,78 @@ def build_templates() -> list[Template]:
         lambda w, k: {"repo": _pick(w, "t20", REPOS, k)},
         lambda w, p: [{"language": r["language"]} for r in w.repos if r["full_name"] == p["repo"]],
         [("github.get_repository", {"repo": P("repo")})])
+    # ---------------- TEST2: written BEFORE the v2 engine existed; never used for tuning or diagnosis
+    add("t21", "test2",
+        ["What is the status of the notion page titled {title}?", "is the {title} page draft or done?",
+         "progress state of the document called {title}", "notion {title} status"],
+        {"query": "{title}"}, [["status"], ["status"], ["state"], ["status"]],
+        lambda w, k: {"title": _pick(w, "t21", sorted(p["title"] for p in w.pages), k)},
+        lambda w, p: [{"status": x["status"]} for x in w.pages if p["title"].lower() in x["title"].lower()],
+        [("notion.search_pages", {"query": P("title")}), ("notion.get_page", {"page_id": PREV("page_id")})])
+    add("t22", "test2",
+        ["Who is assigned to issue {number} in {repo}? Give their github login", "who owns issue #{number} on {repo}?",
+         "the person handling ticket {number} of the {repo} codebase: login", "{repo} issue {number} assignee"],
+        {"repo": "{repo}", "number": "{number}"}, [["assignee"], ["assignee"], ["login"], ["assignee"]],
+        lambda w, k: (lambda i: {"repo": i["repo"], "number": i["number"]})(_pick(w, "t22", [i for i in w.issues if i["assignee"]], k)),
+        lambda w, p: [{"assignee": i["assignee"]} for i in w.issues if i["repo"] == p["repo"] and i["number"] == p["number"]],
+        [("github.get_issue", {"repo": P("repo"), "number": P("number")})])
+    add("t23", "test2",
+        ["List the branches of repository {repo} with their head sha", "what branches does {repo} have?",
+         "git branches in the {repo} project and their latest commit", "{repo} branches sha"],
+        {"repo": "{repo}"}, [["name", "sha"], ["name", "sha"], ["branch", "sha"], ["name", "sha"]],
+        lambda w, k: {"repo": _pick(w, "t23", REPOS, k)},
+        lambda w, p: [{"name": "main", "sha": "a1b2c3d"}, {"name": "release", "sha": "d4e5f6a"}, {"name": "dev", "sha": "0f9e8d7"}],
+        [("github.list_branches", {"repo": P("repo")})])
+    add("t24", "test2",
+        ["What is the phone number of {name} at {company}?", "phone for {name} from {company}",
+         "how do I call {name} who works at {company}", "{company} {name} phone"],
+        {"company": "{company}", "name": "{name}"}, [["phone"], ["phone"], ["phone_number"], ["phone"]],
+        lambda w, k: (lambda c: {"company": c["company"], "name": c["name"]})(_pick(w, "t24", sorted(w.contacts, key=lambda c: c["contact_id"]), k)),
+        lambda w, p: [{"phone": c["phone"]} for c in w.contacts if c["company"] == p["company"] and c["name"] == p["name"]],
+        [("crm.list_contacts", {"company": P("company")})])
+    add("t25", "test2",
+        ["What industry is {company} in and how many employees does it have?", "{company}: industry and headcount?",
+         "business sector and staff size of {company}", "company {company} industry employees"],
+        {"company": "{company}"}, [["industry", "employees"], ["industry", "employees"], ["industry", "employee_count"], ["industry", "employees"]],
+        lambda w, k: {"company": _pick(w, "t25", sorted(c["name"] for c in w.companies), k)},
+        lambda w, p: [{"industry": c["industry"], "employees": c["employees"]} for c in w.companies if c["name"] == p["company"]],
+        [("crm.get_company", {"company": P("company")})])
+    add("t26", "test2",
+        ["Who organized the {title} meeting? Give their email", "who is running {title}",
+         "organizer of the event called {title}, as an email address", "{title} organizer"],
+        {"query": "{title}"}, [["organizer"], ["organizer"], ["organizer_email"], ["organizer"]],
+        lambda w, k: {"title": _pick(w, "t26", sorted(e["title"] for e in w.events if sum(1 for f in w.events if e["title"].lower() in f["title"].lower()) == 1), k)},
+        lambda w, p: [{"organizer": e["organizer"]} for e in w.events if p["title"].lower() in e["title"].lower()],
+        [("calendar.search_events", {"query": P("title")}), ("calendar.get_event", {"event_id": PREV("event_id")})])
+    add("t27", "test2",
+        ["What are the name and job title of slack user {user_id}?", "who is {user_id} and what is their job title",
+         "full name and job title of the slack member {user_id}", "slack {user_id} name title"],
+        {"user_id": "{user_id}"}, [["name", "title"], ["name", "title"], ["name", "job_title"], ["name", "title"]],
+        lambda w, k: {"user_id": _pick(w, "t27", sorted(p["slack_id"] for p in w.people.values()), k)},
+        lambda w, p: [{"name": w.people[w.slack_to_login[p["user_id"]]]["name"], "title": w.people[w.slack_to_login[p["user_id"]]]["title"]}],
+        [("slack.get_user_profile", {"user_id": P("user_id")})])
+    add("t28", "test2",
+        ["List the deals owned by {owner_email} with company and stage", "what deals is {owner_email} handling and where are they",
+         "opportunities assigned to {owner_email}: customer and pipeline position", "deals {owner_email} company stage"],
+        {"owner_email": "{owner_email}"}, [["company", "stage"], ["company", "stage"], ["company_name", "stage"], ["company", "stage"]],
+        lambda w, k: {"owner_email": _pick(w, "t28", sorted({d["owner_email"] for d in w.deals}), k)},
+        lambda w, p: [{"company": d["company"], "stage": d["stage"]} for d in w.deals if d["owner_email"] == p["owner_email"]],
+        [("crm.list_deals", {"owner_email": P("owner_email")})])
+    add("t29", "test2",
+        ["How many stars does repository {repo} have?", "star count of {repo}",
+         "popularity of the {repo} project in github stars", "{repo} stars"],
+        {"repo": "{repo}"}, [["stars"], ["stars"], ["stars"], ["stars"]],
+        lambda w, k: {"repo": _pick(w, "t29", REPOS, k)},
+        lambda w, p: [{"stars": r["stars"]} for r in w.repos if r["full_name"] == p["repo"]],
+        [("github.get_repository", {"repo": P("repo")})])
+    add("t30", "test2",
+        ["List the commits in {repo} made since {since} with sha and message", "what changed in {repo} after {since}?",
+         "code changes pushed into {repo} on or after {since}", "{repo} commits since {since}"],
+        {"repo": "{repo}", "since": "{since}"}, [["sha", "message"], ["sha", "message"], ["commit_sha", "commit_message"], ["sha", "message"]],
+        lambda w, k: (lambda c: {"repo": c[0], "since": c[1]})(_pick(w, "t30", [(r, d) for r in REPOS for d in ("2026-10-08", "2026-10-12", "2026-10-15")
+                                                                                if 1 <= sum(1 for c in w.commits if c["repo"] == r and c["date"] >= d) <= 8], k)),
+        lambda w, p: [{"sha": c["sha"], "message": c["message"]} for c in w.commits if c["repo"] == p["repo"] and c["date"] >= p["since"]],
+        [("github.list_commits", {"repo": P("repo"), "since": P("since")})])
     return T
 
 

@@ -48,21 +48,27 @@ def _snake(s: str) -> str:
     return s.replace(" ", "_")
 
 
+VARIANTS = ["", "legacy ", "archived ", "partner ", "regional ", "staging "]
+
+
 def make_distractors(n: int) -> list[Tool]:
-    """Return up to n distractor tools (3 per noun: list/get/search)."""
+    """Return up to n distractor tools (3 per noun: list/get/search). Beyond the first 60 nouns, prefixed variants
+    ('legacy tickets', 'partner invoices') are added: realistic duplicated systems with near-identical shapes."""
     out: list[Tool] = []
-    for dom, plural, sing, extra in NOUNS:
-        if len(out) >= n:
-            break
-        idf = f"{_snake(sing)}_id"
-        base = [Out(idf, f"{sing} id"), Out("name", f"{sing} name"), Out("status", f"{sing} status"),
-                Out("owner_email", f"email address of the {sing} owner"), Out(_snake(extra), f"{sing} {extra}"),
-                Out("created_at", "creation date"), Out("updated_at", "last update date")]
-        out.append(Tool(dom, f"list_{_snake(plural)}", f"List {plural} in the {dom} system, optionally filtered by status or owner.",
-                        [Param("status", f"{sing} status"), Param("owner_email", f"email address of the {sing} owner"),
-                         Param("limit", "maximum number of results", False, "integer")], base, "list", lambda a: []))
-        out.append(Tool(dom, f"get_{_snake(sing)}", f"Get one {sing} from the {dom} system by id.",
-                        [Param(idf, f"{sing} id", True)], base + [Out("notes", f"{sing} notes")], "object", lambda a: {}))
-        out.append(Tool(dom, f"search_{_snake(plural)}", f"Search {plural} in the {dom} system by keyword.",
-                        [Param("query", f"keyword to search {plural} for", True)], base[:5], "list", lambda a: []))
+    for var in VARIANTS:
+        for dom, plural0, sing0, extra in NOUNS:
+            if len(out) >= n:
+                return out[:n]
+            plural, sing = var + plural0, var + sing0
+            idf = f"{_snake(sing)}_id"
+            base = [Out(idf, f"{sing} id"), Out("name", f"{sing} name"), Out("status", f"{sing} status"),
+                    Out("owner_email", f"email address of the {sing} owner"), Out(_snake(extra), f"{sing} {extra}"),
+                    Out("created_at", "creation date"), Out("updated_at", "last update date")]
+            out.append(Tool(dom, f"list_{_snake(plural)}", f"List {plural} in the {dom} system, optionally filtered by status or owner.",
+                            [Param("status", f"{sing} status"), Param("owner_email", f"email address of the {sing} owner"),
+                             Param("limit", "maximum number of results", False, "integer")], base, "list", lambda a: []))
+            out.append(Tool(dom, f"get_{_snake(sing)}", f"Get one {sing} from the {dom} system by id.",
+                            [Param(idf, f"{sing} id", True)], base + [Out("notes", f"{sing} notes")], "object", lambda a: {}))
+            out.append(Tool(dom, f"search_{_snake(plural)}", f"Search {plural} in the {dom} system by keyword.",
+                            [Param("query", f"keyword to search {plural} for", True)], base[:5], "list", lambda a: []))
     return out[:n]

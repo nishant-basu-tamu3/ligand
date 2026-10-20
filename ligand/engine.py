@@ -19,7 +19,7 @@ from typing import Callable
 
 import numpy as np
 
-from .text import Embedder, cos, ntok, words
+from .text import Embedder, cos, ntok, stem, words
 from .world import Tool
 
 
@@ -34,6 +34,20 @@ def head(desc: str) -> str:
 
 def toks(name: str) -> frozenset:
     return frozenset(words(name.replace("_", " ")))
+
+
+# The "address" of a field is its type: the type-nouns in its name (or, for bare names like `author`, in the head phrase
+# of its description: 'github login of the author' -> login). Two fields with *conflicting* known types cannot bind
+# (database_name -> database_id, author_email -> author). Unknown type = no constraint. Closed class of common schema nouns.
+TYPE_NOUNS = frozenset(stem(w) for w in (
+    "id name email number date time timestamp title url status login path count amount text content size key phone description".split()))
+
+
+def typeset(name: str, desc: str = "") -> frozenset:
+    ts = frozenset(w for w in words(name.replace("_", " ")) if w in TYPE_NOUNS)
+    if not ts and desc:
+        ts = frozenset(w for w in words(head(desc)) if w in TYPE_NOUNS)
+    return ts
 
 
 @dataclass
@@ -68,6 +82,14 @@ class Cfg:
     io_shape: bool = True     # False -> semantic top-1 tool + bind params (what plain tool-search does)
     ask: bool = True
     hints: bool = True
+    address: bool = False     # v2: type gate on bindings + exhaustive search (no similarity pool)
+    index: bool = False       # v2: candidate tools come from the adjacency index (type/link edges), not a scan
+    prune: bool = False       # v2: goal-directed pruning: only chains whose last step produces a wanted field, only prefixes that can still reach one
+    bid: bool = False         # v2: each server searches its own tools and bids; per-server calibration
+    abstain: bool = False     # v2: servers that own nothing the agent's `have` can feed or filter do not bid
+    contrastive: bool = False # v2: when the agent resolves an `ask`, record the rejected candidates as negatives
+    cal_up: float = 1.03
+    cal_down: float = 0.85
     allow_write: bool = False
     fanout_cap: int = 12
     row_cap: int = 25
@@ -76,6 +98,11 @@ class Cfg:
 def cfg_safe(**kw) -> Cfg:
     """Operating point selected on DEV: asks the agent when the top two bindings are close."""
     return Cfg(**kw)
+
+
+def cfg_v2(**kw) -> Cfg:
+    """v2 = v1 `safe` operating point + type-address gate/exhaustive search + per-server bidding + contrastive memory."""
+    return Cfg(**{**dict(address=True, index=True, prune=True, bid=True, abstain=True, contrastive=True), **kw})
 
 
 def cfg_fast(**kw) -> Cfg:
@@ -87,8 +114,11 @@ def cfg_fast(**kw) -> Cfg:
 class Receptor:
     tool: Tool
     doc_vec: np.ndarray
-    @property
-    def fq(self): return self.tool.fq
+    fq: str = ""
+
+    def __post_init__(self):
+        self.fq = self.tool.fq
+
     @property
     def kind(self): return self.tool.kind
 
@@ -127,6 +157,7 @@ class Emission:
     fast: bool = False
     missing: list = field(default_factory=list)
     fields: list = field(default_factory=list)
+    par_ms: float = 0.0
 
 
 class Engine:
@@ -147,6 +178,12 @@ class Engine:
         self.reflexes: dict[tuple, np.ndarray] = {}
         self.pending: dict[str, dict] = {}
         self.log: list = []
+        self._link_tg: dict = {}
+        self._srv_key: dict = {}
+        self.index_built = False
+        self.index_ms = 0.0
+        self.cal = defaultdict(lambda: 1.0)
+        self._par_save = 0.0
         self.gsum = None
         self.gn = 0
         self.reflex_mean: dict = {}
@@ -176,6 +213,10 @@ class Engine:
         sa, sb = toks(a_name), toks(b_name)
         if sa and sa == sb:
             return 1.0
+        if self.cfg.address:
+            ta, tb = typeset(a_name), typeset(b_name, b_desc)
+            if ta and tb and not (ta & tb):
+                return 0.0
         if sa and sb:
             if sa > sb:
                 if guard_doc is None or (sa - sb) <= guard_doc:
@@ -356,7 +397,7 @@ class Engine:
     def _pool(self, goal_vec, want) -> list[Receptor]:
         cfg = self.cfg
         recs = [r for r in self.recs if cfg.allow_write or not r.tool.writes]
-        if len(recs) <= cfg.pool_all:
+        if cfg.address or len(recs) <= cfg.pool_all:
             return recs
         sc = sorted(recs, key=lambda r: -cos(goal_vec, r.doc_vec))
         pool = {r.fq: r for r in sc[: cfg.pool_k]}
@@ -374,15 +415,100 @@ class Engine:
                         pool[fq] = self.by_fq[fq]
         return list(pool.values())
 
-    def search(self, goal_vec, have_keys, want) -> tuple[list[Chain], list[Chain]]:
-        """Returns (complete chains, partial chains). Partial = valid wiring but some wanted fields have no match."""
+    def _servers_for_key(self, k: str) -> set:
+        """Servers that own a tool param the key can feed, or an output the key can filter. Cached per key."""
+        v = self._srv_key.get(k)
+        if v is None:
+            v = set()
+            for r in self.recs:
+                srv = r.tool.server
+                if srv in v:
+                    continue
+                if any(self.sim_have_param(k, r, p) >= self.cfg.th_in for p in r.tool.params) or \
+                   any(self.sim_have_out(k, r, o) >= self.cfg.th_filter for o in r.tool.outs):
+                    v.add(srv)
+            self._srv_key[k] = v
+        return v
+
+    def build_index(self):
+        """Address index: for every output field of every tool, the set of tools that have a param it can feed.
+        One matrix multiply over description-head and name embeddings (same formula as sim_link), built once."""
+        t0 = time.perf_counter()
+        outs, pars = [], []
+        for r in self.recs:
+            for o in r.tool.outs:
+                outs.append((r.fq, o))
+            for p in r.tool.params:
+                pars.append((r.fq, p))
+        def mats(items):
+            H = np.stack([self.emb.embed(head(f.desc)) for _, f in items]).astype(np.float32)
+            N = np.stack([self.emb.embed(f.name.replace("_", " ")) for _, f in items]).astype(np.float32)
+            ids = {}
+            T = np.array([ids.setdefault(toks(f.name), len(ids)) for _, f in items]), ids
+            return H, N, T
+        Ho, No, (To, ids_o) = mats(outs)
+        Hp, Np, (Tp_raw, ids_p) = mats(pars)
+        # token-set identity across the two lists: remap param ids into the output id space
+        inv_p = {v: k for k, v in ids_p.items()}
+        Tp = np.array([ids_o.get(inv_p[i], -1 - i) for i in Tp_raw])
+        sim = np.maximum(np.maximum(Ho @ Hp.T, 0.8 * (No @ Np.T)), np.where(To[:, None] == Tp[None, :], 0.95, 0.0))
+        M = sim >= self.cfg.th_link
+        par_fq = np.array([fq for fq, _ in pars])
+        self._link_tg = {}
+        for i, (fq, o) in enumerate(outs):
+            self._link_tg[(fq, o.name)] = set(par_fq[np.nonzero(M[i])[0]].tolist())
+        self.index_ms = (time.perf_counter() - t0) * 1e3
+        self.index_built = True
+
+    def _link_targets(self, ra: Receptor, o) -> set:
+        if not getattr(self, "index_built", False):
+            self.build_index()
+        return self._link_tg[(ra.fq, o.name)]
+
+    def _rec_search(self, pool, goal_vec, have_keys, want, found, part):
         cfg = self.cfg
-        pool = self._pool(goal_vec, want)
-        found: dict[tuple, Chain] = {}
-        part: dict[tuple, Chain] = {}
+        use_idx = cfg.index
+        cand_cache: dict = {}
+        W, dist = None, None
+        if use_idx and cfg.prune and want:
+            if not self.index_built:
+                self.build_index()
+            pfq = {r.fq for r in pool}
+            W = {r.fq for r in pool if any(self.sim_want_out(w, r, o) >= cfg.th_out for w in want for o in r.tool.outs)}
+            rev: dict = defaultdict(set)
+            for r in pool:
+                tg = set()
+                for o in r.tool.outs:
+                    tg |= self._link_tg[(r.fq, o.name)]
+                for b in tg & pfq:
+                    if b != r.fq:
+                        rev[b].add(r.fq)
+            dist = {w: 0 for w in W}
+            frontier = list(W)
+            for d in range(1, cfg.max_depth):
+                nxt = []
+                for b in frontier:
+                    for a in rev[b]:
+                        if a not in dist:
+                            dist[a] = d
+                            nxt.append(a)
+                frontier = nxt
+
+        def candidates(steps, avail):
+            if not use_idx or not steps:
+                return pool
+            ck = tuple(sorted((si, o.name) for si, _, o in avail)), tuple(s_.r.fq for s_ in steps)
+            c = cand_cache.get(ck)
+            if c is None:
+                tg: set = set()
+                for _, ra, o in avail:
+                    tg |= self._link_targets(ra, o)
+                c = [r for r in pool if r.fq in tg]
+                cand_cache[ck] = c
+            return c
 
         def rec(steps, avail):
-            if steps:
+            if steps and (W is None or steps[-1].r.fq in W):
                 ch = self._finish(steps, have_keys, want, goal_vec)
                 if ch is not None:
                     self._score(ch, goal_vec)
@@ -391,8 +517,10 @@ class Engine:
                         store[ch.key] = ch
             if len(steps) >= cfg.max_depth:
                 return
-            for r in pool:
+            for r in candidates(steps, avail):
                 if any(s.r is r for s in steps):
+                    continue
+                if dist is not None and dist.get(r.fq, 99) > cfg.max_depth - len(steps) - 1:
                     continue
                 st = self._bind(r, have_keys, avail)
                 if st is None:
@@ -405,7 +533,45 @@ class Engine:
                 rec(steps + [st], avail + [(si, r, o) for o in r.tool.outs])
 
         rec([], [])
+
+    def search(self, goal_vec, have_keys, want) -> tuple[list[Chain], list[Chain]]:
+        """Returns (complete chains, partial chains). Partial = valid wiring but some wanted fields have no match.
+        bid mode: every server searches only its own (small) catalog and bids; bids are calibrated per server and merged.
+        Cross-server chains are not possible in round one; if no server bids, fall back to one global search."""
+        cfg = self.cfg
+        found: dict[tuple, Chain] = {}
+        part: dict[tuple, Chain] = {}
         key = lambda c: (-c.score, c.key)
+        if cfg.bid:
+            by_server: dict[str, list] = defaultdict(list)
+            for r in self.recs:
+                if cfg.allow_write or not r.tool.writes:
+                    by_server[r.tool.server].append(r)
+            times = []
+            active = None
+            if cfg.abstain and have_keys:
+                active = set()
+                for k in have_keys:
+                    active |= self._servers_for_key(k)
+                if not active:
+                    active = None
+            for srv, recs in by_server.items():
+                if active is not None and srv not in active:
+                    continue          # abstain: nothing this server owns can consume what the agent has
+                t0 = time.perf_counter()
+                f, pt = {}, {}
+                self._rec_search(recs, goal_vec, have_keys, want, f, pt)
+                for c in list(f.values()) + list(pt.values()):
+                    c.score *= self.cal[srv]
+                found.update(f)
+                part.update(pt)
+                times.append((time.perf_counter() - t0) * 1e3)
+            self._par_save = (sum(times) - max(times)) if times else 0.0   # servers would run concurrently
+            if found or part:
+                return sorted(found.values(), key=key), sorted(part.values(), key=key)
+            found, part = {}, {}
+        pool = self._pool(goal_vec, want)
+        self._rec_search(pool, goal_vec, have_keys, want, found, part)
         return sorted(found.values(), key=key), sorted(part.values(), key=key)
 
     def semantic_top1(self, goal_vec, have_keys, want) -> Chain | None:
@@ -465,6 +631,12 @@ class Engine:
 
     # ---------------------------------------------------------------- public API
     def emit(self, goal: str, have: dict, want: list, prev: tuple | None = None) -> Emission:
+        self._par_save = 0.0
+        em = self._emit(goal, have, want, prev)
+        em.par_ms = max(0.0, em.router_ms - self._par_save)
+        return em
+
+    def _emit(self, goal: str, have: dict, want: list, prev: tuple | None = None) -> Emission:
         t0 = time.perf_counter()
         cfg = self.cfg
         if prev is not None:
@@ -536,6 +708,10 @@ class Engine:
         p = self.pending.pop(ticket)
         if k is None or k < 0 or k >= len(p["chains"]):
             return Emission("none", ticket, response=json.dumps({"t": ticket, "rows": []}))
+        if self.cfg.contrastive and self.cfg.memory:
+            for j, c in enumerate(p["chains"]):
+                if j != k:
+                    self._record(p.get("goal", ""), p["gv"], c.key, False, cal=False)
         return self._exec(ticket, p["chains"][k], p["have"], p["want"], p["gv"], t0, goal=p.get("goal", ""))
 
     def _exec(self, ticket, ch: Chain, have, want, gv, t0, fast=False, goal: str = "") -> Emission:
@@ -552,9 +728,12 @@ class Engine:
             return
         self._record(p["goal"], p["gv"], p["chain"].key, ok)
 
-    def _record(self, goal: str, gv, key: tuple, ok: bool, log: bool = True):
+    def _record(self, goal: str, gv, key: tuple, ok: bool, log: bool = True, cal: bool = True):
         if log:
             self.log.append({"goal": goal, "chain": list(key), "ok": bool(ok)})
+        if cal and self.cfg.bid:
+            srv = key[0].split(".")[0]
+            self.cal[srv] = min(1.10, self.cal[srv] * self.cfg.cal_up) if ok else max(0.85, self.cal[srv] * self.cfg.cal_down)
         self.episodes[key].append((gv, bool(ok)))
         st = self.stats.setdefault(key, {"succ": 0, "goals": [], "recent": deque(maxlen=4)})
         st["recent"].append(bool(ok))

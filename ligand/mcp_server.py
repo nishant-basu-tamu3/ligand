@@ -1,7 +1,7 @@
 """The Ligand MCP server. An agent connects to THIS server only and sees ONE tool: emit.
 Behind it, Ligand connects to ordinary MCP servers, reads their tool schemas, and routes intents.
 
-  python -m ligand.mcp_server [--seed 0] [--memory path.json] [--fast]
+  python -m ligand.mcp_server [--seed 0] [--memory path.json] [--v1 | --fast]
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from .engine import Engine, cfg_fast, cfg_safe
+from .engine import Engine, cfg_fast, cfg_safe, cfg_v2
 from .mcp_backends import SERVERS
 from .mcp_bridge import McpBackends
 from .protocol import EMIT_DEF
@@ -50,7 +50,7 @@ def build(engine: Engine, memory_path: str | None) -> Server:
 
 async def amain(args):
     bridge = McpBackends(SERVERS, args.seed).start()
-    cfg = (cfg_fast if args.fast else cfg_safe)()
+    cfg = cfg_fast() if args.fast else (cfg_safe() if args.v1 else cfg_v2())
     engine = Engine(bridge.tools, bridge.call, cfg)
     if args.memory:
         try:
@@ -69,5 +69,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--memory", default=None)
-    ap.add_argument("--fast", action="store_true")
+    ap.add_argument("--fast", action="store_true", help="v1 low-clarification operating point")
+    ap.add_argument("--v1", action="store_true", help="use the v1 engine instead of v2 (type gate, index, bidding, contrastive memory)")
     asyncio.run(amain(ap.parse_args()))
