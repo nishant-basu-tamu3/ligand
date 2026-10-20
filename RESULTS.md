@@ -1,5 +1,105 @@
 # Ligand: results, and what they do not show
 
+Two iterations, both measured. **Part 1 is v2** (type-address gate + adjacency index + per-server bidding + contrastive memory).
+**Part 2 is v1** (the first prototype), kept as written. Means over 5 world seeds; seeds change the data but not the 30 task templates
+(× 2 instantiations × 4 phrasings = 240 distinct emits per run), so read the ± as "world variation", not as statistical confidence.
+
+# Part 1: v2
+
+## TL;DR
+1. **The accuracy loss at scale is mostly fixed.** On the fresh test2 split (10 templates written *before* v2 existed, never used for tuning),
+   v1 → v2 success: 37 tools **92.3% → 92.5%** (no change), 100 tools **81.5% → 92.2%**, 217 tools **77.8% → 89.5%**, 500 tools **78.2% → 86.8%**.
+   Silent wrong answers (confident wrong binding): 217 tools **7.8% → 2.2%**, 500 tools **6.2% → 1.7%**.
+2. **The two ideas are complementary, neither is enough alone** (217 tools, test2): type gate + index alone 86.8% / 0.8% wrong but **2.9 s per call** and 51% clarifications;
+   bidding alone 89.2% / **5.8% wrong**; both 89.5% / 2.2% / 16 ms.
+3. **Speed is not solved at 500 tools.** Routing is 16 ms at 217 tools (v1: 20) but **291 ms at 500 tools** (v1: 34) on one machine.
+   A simulated "servers search concurrently" figure is 46 ms, but I did not actually run servers concurrently.
+4. **What v2 did NOT fix:** wording shift after learning (below), and paraphrase misses that come from the lexical embedding.
+
+## Cold start, v1 vs v2 (5 seeds)
+| tools | engine | dev | test* | **test2 (clean)** | wrong-bind | ask rate | router ms (one machine) | router ms (servers parallel, simulated) |
+|---|---|---|---|---|---|---|---|---|
+| 37 | v1 | 95.0% | 95.0% | **92.3%** | 1.7% | 40.7% | 10 | 10 |
+| 37 | v2 | 97.5% | 95.0% | **92.5%** | 1.7% | 26.5% | 2 | 1 |
+| 100 | v1 | 86.8% | 89.8% | **81.5%** | 3.2% | 36.6% | 10 | 10 |
+| 100 | v2 | 97.5% | 94.8% | **92.2%** | 1.7% | 27.6% | 7 | 3 |
+| 217 | v1 | 86.0% | 76.7% | **77.8%** | 7.8% | 33.0% | 20 | 20 |
+| 217 | v2 | 97.5% | 93.8% | **89.5%** | 2.2% | 27.7% | 16 | 3 |
+| 500 | v1 | 83.8% | 74.0% | **78.2%** | 6.2% | 33.8% | 34 | 34 |
+| 500 | v2 | 97.5% | 92.8% | **86.8%** | 1.7% | 29.0% | 291 | 46 |
+
+Provenance: dev (t01–t10) tuned v1's thresholds and informed the type gate; **test\* (t11–t20) was seen when I diagnosed v1's failures, so it is not clean for v2**;
+test2 (t21–t30) is the only split v2 was not designed against. Quote test2.
+Extra tools are synthetic distractors in duplicated systems ("legacy tickets", "partner invoices") with near-identical shapes: a hard-but-artificial setting.
+![scale](results/fig_v2_scale.png)
+
+## Where the gain comes from (217 tools)
+| engine | dev | test* | test2 | wrong-bind | ask rate | router ms |
+|---|---|---|---|---|---|---|
+| v1 | 86.0% | 76.7% | 77.8% | 7.8% | 33.0% | 20 |
+| + type gate, index, goal-directed search (one global search) | 95.0% | 88.0% | 86.8% | **0.8%** | 51.0% | 2,902 |
+| + per-server bidding only (no type gate) | 95.0% | 83.0% | 89.2% | 5.8% | 37.9% | 39 |
+| v2 without contrastive memory | 97.5% | 93.0% | 89.2% | 2.4% | 37.1% | 16 |
+| **v2 (all)** | 97.5% | 93.8% | 89.5% | 2.2% | 27.7% | 16 |
+
+- **Type gate** (a closed list of schema nouns: id, name, email, title…; conflicting types cannot bind) removes type errors such as `database_name` → `database_id` and `author_email` → `author`. This is what drives wrong-binding down.
+- **Bidding** (each server searches only its own tools; servers that own nothing the agent's `have` can feed or filter abstain; calibrated per server) fixes the pruning loss and the cost of global search.
+- **Adjacency index + goal-directed pruning** (only chains whose last step produces a wanted field; only prefixes that can still reach one) gave identical decisions to the full scan (240/240) at 3-4× less time.
+- **Contrastive memory** (when the agent resolves an `ask`, the rejected candidates are recorded as negatives): clarifications 37.1% → 27.7% with no accuracy change. *Caveat:* it learns from picks *during* the run, so "cold" v2 is not purely cold; v1 has no such signal.
+
+## Learning (16 passes, online)
+| engine | feedback | ask rate (passes 3–16) | success | wrong-bind |
+|---|---|---|---|---|
+| v1 | clean | 5.2% | 94.8% | 1.8% |
+| v2 | clean | 4.0% | 94.8% | 2.2% |
+| v1 | 30% wrong | 15.5% | 91.2% | 5.2% |
+| v2 | 30% wrong | **7.9%** | 92.9% | 3.9% |
+
+Clean feedback: no real difference. **v2 is more robust to bad feedback** (half the clarification rate, fewer wrong answers).
+![learning](results/fig_v2_learning.png)
+
+## Wording shift after learning: NOT fixed
+Train on new-parameter-free instantiations with wording A/B, test on new parameters with wording C/D:
+| engine | cold success | trained success | cold wrong | trained wrong |
+|---|---|---|---|---|
+| v1 | 88.3% | 84.7% | 3.3% | 8.3% |
+| v2 | 90.0% | 85.0% | 3.3% | 8.0% |
+
+Learned shortcuts still fire on differently-worded goals of confusable tasks. Contrastive memory did not change this. Still open.
+
+## Tokens per task, 37 tools, test2 split (cold; baselines are oracle agents)
+| | input tokens | cost proxy |
+|---|---|---|
+| Raw MCP | 7,182 | 4,078 |
+| CLI, unfamiliar | 3,655 | 1,806 |
+| MCP + tool search | 2,297 | 1,584 |
+| MCP + code mode | 1,869 | 1,823 |
+| **Ligand v2** | **1,454** | **1,189** |
+| Ligand v1 | 1,560 | 1,222 |
+| CLI, familiar (idealised) | 927 | 771 |
+
+Agent-visible context stays ~1.5k tokens at any catalog size. An idealised "the model already knows the CLI" baseline is still cheaper.
+
+## Real MCP end to end (v2 engine)
+Agent → Ligand MCP server → 6 ordinary stdio MCP servers. The agent saw **one tool (286 tokens)**; the same servers directly: 37 tools, 2,881 tokens.
+60 tasks cold: **56/60** correct, 18 clarifications. Server restarted, memory loaded from disk: 54/60, 4 clarifications. Median call 14–17 ms.
+
+## What remains wrong (per template, 217 tools)
+Fixed by v2: t11 (0% → 100%), t26 (25% → 100%), t03, t07, t08, t16, t17, t28 (all → 100%). Still weak, all on the *paraphrase* phrasing:
+t21 (45%: agent says `state`, tool says `status`), t12 (62.5%), t06, t18, t22, t23 (75%: `login`/`assignee`, `branch`/`name`, `chat`/`slack`). These are vocabulary gaps a real embedding model should narrow; I could not test one.
+
+## What this does NOT show
+- **No LLM in the loop.** An oracle writes `have`/`want`, picks from `ask`, fixes `need`. Baselines are oracle agents. The decisive test is a real model driving Ligand.
+- **Self-authored world, tools, tasks and distractors.** test2 was written before v2 but after v1, by the same author, in the same world.
+- **The type gate uses a closed noun list** I chose after seeing failures on dev/test; real schemas should supply types (`format: email`, `uri`, …) instead.
+- **Parallel speed is simulated** (max over per-server search time); latencies were measured with two benchmark processes sharing two cores.
+- **500-tool latency (291 ms) is a real weakness**: per-domain servers with ~45 tools each search exhaustively.
+- Lexical embeddings only; no pretrained model was reachable. Needs `outputSchema` on tools. Read-only tasks; no auth or write-safety model.
+
+---
+
+## Part 2: v1 results (first session, 40-task suite, 37 tools)
+
 Prototype + benchmark, built and run in one session. Everything here is reproducible with the commands in README.md.
 Numbers are means over 5 world seeds. **Read the ±0.000s as "the suite is deterministic", not "precise"**: seeds change the
 data but the 20 task templates × 4 phrasings are the same, so the effective sample is about 80 distinct (template, phrasing) cases.

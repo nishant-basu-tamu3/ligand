@@ -49,7 +49,7 @@ def fig_scale(R):
     ax.set_ylabel("router ms per emit (warm)")
     ax.set_title("Routing time")
     ax.set_xlim(0, 700)
-    fig.text(0.99, -0.03, "*simulated: max over per-server search times; servers were not actually run concurrently", ha="right", fontsize=8, color="#555")
+    fig.text(0.99, -0.10, "*simulated: max over per-server search times; servers were not actually run concurrently", ha="right", fontsize=8, color="#555")
     fig.savefig("results/fig_v2_scale.png")
     plt.close(fig)
 

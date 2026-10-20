@@ -31,13 +31,23 @@ emit(goal="email of whoever wrote PR 117", have={"repo":"acme/infra","number":11
  → {"t":"t42","need":["message"],"fields":["name","text","ts"]}                                                                               # then re-emit with a listed name
 ```
 
+## v2 (second iteration)
+The blood-stream bus got an address system and organs instead of random drift:
+- **Type-address gate** (leukocyte homing): fields carry a type; conflicting types cannot bind (`database_name` ≠ `database_id`).
+- **Adjacency index + goal-directed search**: candidate tools come from a precomputed output→input graph and only chains that can reach a wanted field are explored.
+- **Per-server bidding** (like ARP): each server searches only its own tools; servers with nothing to contribute abstain; bids are calibrated per server.
+- **Contrastive memory**: when the agent resolves an `ask`, the rejected candidates are remembered as negatives.
+Result (fresh test2 split): 217 tools 77.8% → 89.5%, 500 tools 78.2% → 86.8%, silent wrong answers 7.8% → 2.2%; 500-tool latency and wording shift remain open. See RESULTS.md.
+
 ## Run it
 ```bash
 pip install numpy "mcp<2" matplotlib          # mcp 2.x changed its Python API; this prototype targets 1.x
 python -m tests.test_mcp_e2e                  # real MCP: client → Ligand server → 6 stdio MCP servers (≈20 s)
 python -m bench.probe --v                     # dev-split cold-start probe with failure details
-python -m bench.run_bench                     # full benchmark → results/results.json  (≈15 min on 2 cores)
+python -m bench.run_bench                     # v1 benchmark → results/results.json  (≈5 min on 2 cores)
 python -m bench.report ; python -m bench.figures
+python -m bench.run_v2                        # v1 vs v2, 37-500 tools, ablations → results/results_v2.json (≈40 min on 2 cores)
+python -m bench.report_v2 ; python -m bench.figures_v2
 python -m ligand.mcp_server --memory mem.json # the server itself (stdio); point an MCP client at it
 ```
 
