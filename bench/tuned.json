@@ -1,0 +1,8 @@
+{
+ "sem_floor": 0.2,
+ "len_pen": 0.9,
+ "margin": 0.2,
+ "filter_pen": 0.7,
+ "th_link": 0.55,
+ "sem_max_w": 0.8
+}
